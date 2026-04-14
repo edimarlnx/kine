@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
-	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -724,7 +723,12 @@ func (b *MongoBackend) notifyWatchers() {
 func (b *MongoBackend) fetchEventsSince(ctx context.Context, key string, lastRev int64) ([]*server.Event, error) {
 	filter := bson.M{"revision": bson.M{"$gt": lastRev}}
 	if key != "" {
-		filter["key"] = bson.M{"$regex": "^" + regexEscape(key)}
+		lower, upper := prefixRange(key)
+		keyFilter := bson.M{"$gte": lower}
+		if upper != "" {
+			keyFilter["$lt"] = upper
+		}
+		filter["key"] = keyFilter
 	}
 
 	opts := options.Find().SetSort(bson.D{{Key: "revision", Value: 1}})
@@ -962,17 +966,33 @@ func setupIndexes(ctx context.Context, coll *mongo.Collection) error {
 
 // buildPrefixFilter constructs a bson.M that matches all keys with the given prefix
 // and with key >= startKey (for range queries / pagination).
+// It uses a range query ($gte / $lt) instead of $regex so that MongoDB can perform
+// an index range scan on idx_key rather than evaluating a regex against every entry.
 func buildPrefixFilter(prefix, startKey string) bson.M {
-	filter := bson.M{}
-	keyFilter := bson.M{"$regex": "^" + regexEscape(prefix)}
-	if startKey != "" {
-		keyFilter["$gte"] = startKey
+	lower, upper := prefixRange(prefix)
+	if startKey != "" && startKey > lower {
+		lower = startKey
 	}
-	filter["key"] = keyFilter
-	return filter
+	keyFilter := bson.M{"$gte": lower}
+	if upper != "" {
+		keyFilter["$lt"] = upper
+	}
+	return bson.M{"key": keyFilter}
 }
 
-// regexEscape escapes special regex metacharacters in a string.
-func regexEscape(s string) string {
-	return regexp.QuoteMeta(s)
+// prefixRange returns the [lower, upper) bounds for a lexicographic prefix range.
+// upper is an empty string when no upper bound is needed (prefix is empty or "/").
+func prefixRange(prefix string) (lower, upper string) {
+	if prefix == "" || prefix == "/" {
+		return prefix, ""
+	}
+	b := []byte(prefix)
+	for i := len(b) - 1; i >= 0; i-- {
+		if b[i] < 0xff {
+			b[i]++
+			return prefix, string(b[:i+1])
+		}
+	}
+	// All bytes were 0xff — no finite upper bound exists.
+	return prefix, ""
 }

@@ -1,0 +1,36 @@
+services:
+  mongodb:
+    image: quay.io/mongodb/mongodb-community-server:8.2-ubi8-slim
+    container_name: kine-mongodb
+    networks:
+      - kine-net
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongodb-data:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  kine:
+    build:
+      context: ..
+      target: package
+    container_name: kine
+    networks:
+      - kine-net
+    ports:
+      - "2379:2379"
+    command: ["--endpoint", "mongodb://mongodb:27017/kine"]
+    depends_on:
+      mongodb:
+        condition: service_healthy
+
+networks:
+  kine-net:
+    name: kine-net
+
+volumes:
+  mongodb-data:
