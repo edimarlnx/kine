@@ -208,3 +208,76 @@ docker compose -f examples/docker-compose.mongodb.yml down -v
 ```
 
 The `-v` flag also removes the MongoDB data volume.
+
+## Migrating from another backend
+
+> **Warning:** the migration tool is experimental and has not been extensively tested across different cluster sizes,
+> workloads, or failure scenarios. Use it at your own risk. Always take a full backup of your source database before
+> proceeding.
+
+kine does not support `etcdctl snapshot` (the etcd binary snapshot format is not implemented). Migration between
+backends is done via the etcd KV API using the tool at [migrate/main.go](migrate/main.go).
+
+The tool reads all keys from the source kine endpoint in paginated batches and writes them to the target. Binary
+values (protobuf-encoded Kubernetes objects) are preserved correctly.
+
+### Step 1 — Run both kine instances simultaneously
+
+Start the source (PostgreSQL) kine on its default port and the target (MongoDB) kine on a different port:
+
+```bash
+# source — existing PostgreSQL kine (already running, e.g. on :2379)
+
+# target — MongoDB kine on a different port
+kine --endpoint "mongodb://localhost:27017/kine" --listen-address 0.0.0.0:2380
+```
+
+### Step 2 — Stop k3s / k8s writes
+
+Before migrating, stop the API server so no new writes reach the source during the copy:
+
+```bash
+# k3s
+systemctl stop k3s
+
+# or k3d
+k3d cluster stop <cluster-name>
+```
+
+### Step 3 — Run the migration
+
+```bash
+go run ./examples/migrate \
+  -source http://localhost:2379 \
+  -target http://localhost:2380
+```
+
+Example output:
+
+```
+source: http://localhost:2379
+target: http://localhost:2380
+starting migration...
+  3842 keys migrated
+migration complete: 3842 keys restored
+```
+
+### Step 4 — Switch k3s to the MongoDB kine
+
+Update the k3s datastore endpoint to point to the new kine instance and restart:
+
+```bash
+# Edit /etc/systemd/system/k3s.service or pass the flag directly
+k3s server --datastore-endpoint "mongodb://localhost:27017/kine"
+```
+
+### What is preserved
+
+| Item                      | Preserved                            |
+|---------------------------|--------------------------------------|
+| Current value of each key | Yes                                  |
+| Revision history          | No — revisions are reassigned from 1 |
+| Leases / TTLs             | No                                   |
+
+Revision history is not needed for normal Kubernetes operation. The API server rebuilds its watch cache from the current
+state on startup.
